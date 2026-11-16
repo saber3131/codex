@@ -74,10 +74,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: creator-linux-x64.tar.gz
             binaries: "creator codex-code-mode-host codex-exec-server bwrap"
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: creator-macos-arm64.tar.gz
-            binaries: "creator codex-code-mode-host codex-exec-server"
+          # macOS runners did not get scheduled for this account; add
+          # `macos-latest` / `aarch64-apple-darwin` back here when they do.
     defaults:
       run:
         shell: bash
@@ -159,7 +157,7 @@ jobs:
           cp ../creator/README.zh-CN.md "$out/使用说明.md"
           cd "$out"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            7z a "$RUNNER_TEMP/${{ matrix.archive }}" ./* >/dev/null
+            7z a -tzip -mcu=on "$RUNNER_TEMP/${{ matrix.archive }}" ./* >/dev/null
           else
             tar czf "$RUNNER_TEMP/${{ matrix.archive }}" ./*
           fi
