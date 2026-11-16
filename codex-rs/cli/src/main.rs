@@ -54,6 +54,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod creator;
 mod config_override_args;
 mod daemon_install;
 mod daemon_telemetry;
@@ -111,7 +112,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
 
-/// Codex CLI
+/// 造物主 Creator（内核基于开源 Codex CLI）
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
 #[derive(Debug, Parser)]
@@ -123,8 +124,10 @@ use codex_terminal_detection::TerminalName;
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
     // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    // 造物主 Creator
+    name = "creator",
+    bin_name = "creator",
+    override_usage = "creator [OPTIONS] [PROMPT]\n       creator [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -159,14 +162,32 @@ enum Subcommand {
     /// Run a code review non-interactively.
     Review(ReviewCommand),
 
-    /// Manage login.
+    /// 用紫微星通行证登录造物主 Creator。
+    #[clap(name = "login")]
+    PassportLogin(creator::LoginArgs),
+
+    /// 退出紫微星通行证并撤销本机的龍華樹 Key。
+    #[clap(name = "logout")]
+    PassportLogout,
+
+    /// 查看登录状态、龍華樹余额和 B31.Si-1.3 分工。
+    #[clap(name = "status")]
+    PassportStatus,
+
+    /// 从龍華樹同步模型目录和 B31.Si-1.3 排行榜分工。
+    #[clap(name = "sync")]
+    CreatorSync,
+
+    /// Manage OpenAI / ChatGPT login (upstream Codex; not used by Creator by default).
+    #[clap(name = "openai-login", hide = true)]
     Login(LoginCommand),
 
     /// Supply the existing Codex login to Git's credential-helper protocol.
     #[clap(hide = true)]
     GitCredential(codex_cli::GitCredentialArgs),
 
-    /// Remove stored authentication credentials.
+    /// Remove stored OpenAI authentication credentials (upstream Codex).
+    #[clap(name = "openai-logout", hide = true)]
     Logout(LogoutCommand),
 
     /// Manage external MCP servers for Codex.
@@ -1054,6 +1075,9 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
+    // 造物主 Creator: isolate data in ~/.creator and load the 紫微星通行证 key. Must run
+    // before any thread starts because it sets environment variables.
+    creator::prepare_environment_if_creator();
     codex_build_info::initialize!();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
@@ -1776,6 +1800,18 @@ async fn dispatch_cli(
             )?;
             print_completion(completion_cli);
         }
+        Some(Subcommand::PassportLogin(args)) => {
+            creator::run_login(args).await?;
+        }
+        Some(Subcommand::PassportLogout) => {
+            creator::run_logout().await?;
+        }
+        Some(Subcommand::PassportStatus) => {
+            creator::run_status().await?;
+        }
+        Some(Subcommand::CreatorSync) => {
+            creator::run_sync().await?;
+        }
         Some(Subcommand::Update) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2453,6 +2489,10 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::PassportLogin(_)) => Some("login"),
+        Some(Subcommand::PassportLogout) => Some("logout"),
+        Some(Subcommand::PassportStatus) => Some("status"),
+        Some(Subcommand::CreatorSync) => Some("sync"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),

@@ -1,0 +1,183 @@
+# 造物主 Creator engine: build `creator` for Windows / macOS / Linux and publish a release.
+# Runs on GitHub-hosted runners, so it works in a personal fork without self-hosted runners.
+# Every build first merges the newest open-source Codex (openai/codex main) into the
+# `creator` branch inside the runner, so each release carries the latest Codex features.
+# A daily schedule rebuilds only when upstream Codex has moved; a merge conflict opens an issue.
+name: creator-release
+
+on:
+  push:
+    branches: [creator]
+    paths-ignore: ["**/*.md", "docs/**"]
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: creator-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream: ${{ steps.p.outputs.upstream }}
+      tag: ${{ steps.p.outputs.tag }}
+      skip: ${{ steps.p.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: creator
+          fetch-depth: 0
+      - id: p
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name creator-bot && git config user.email creator-bot@users.noreply.github.com
+          git remote add upstream https://github.com/openai/codex.git
+          git fetch upstream main
+          up="$(git rev-parse upstream/main)"
+          tag="creator-$(git rev-parse --short=7 HEAD)-codex-${up::7}"
+          echo "upstream=$up" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          if ! git merge --no-edit "$up"; then
+            git merge --abort || true
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "造物主内核：合并最新 Codex（${up::7}）有冲突" \
+              --body "creator 分支与 openai/codex main 自动合并失败。Creator 改动只在 cli/src/main.rs、cli/src/creator.rs、cli/Cargo.toml、core/src/client.rs、core/src/creator_alias.rs、tui/src/history_cell/session.rs。"
+            exit 1
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: creator-windows-x64.zip
+            binaries: "creator codex-code-mode-host codex-exec-server codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: creator-linux-x64.tar.gz
+            binaries: "creator codex-code-mode-host codex-exec-server bwrap"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: creator-macos-arm64.tar.gz
+            binaries: "creator codex-code-mode-host codex-exec-server"
+    defaults:
+      run:
+        shell: bash
+        working-directory: codex-rs
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Merge latest upstream Codex (same commit as plan)
+        working-directory: .
+        run: |
+          git config user.name creator-bot && git config user.email creator-bot@users.noreply.github.com
+          git fetch https://github.com/openai/codex.git main
+          git merge --no-edit ${{ needs.plan.outputs.upstream }}
+
+      - name: Install Rust toolchain
+        working-directory: .
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target ${{ matrix.target }}
+          rustup default 1.99.1
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q pkg-config libssl-dev libcap-dev
+
+      - name: Prebuilt V8 (verified checksums)
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build
+        run: |
+          if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          args=()
+          for b in ${{ matrix.binaries }}; do args+=(--bin "$b"); done
+          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+          cargo build --locked --target ${{ matrix.target }} --release "${args[@]}"
+
+      - name: Smoke test
+        if: runner.os != 'Windows'
+        run: |
+          export CREATOR_HOME="$RUNNER_TEMP/creator-home"
+          "$CARGO_TARGET_DIR/${{ matrix.target }}/release/creator" --help | head -20
+          test -f "$CREATOR_HOME/config.toml" && test -f "$CREATOR_HOME/models.json"
+
+      - name: Package
+        run: |
+          rel="$CARGO_TARGET_DIR/${{ matrix.target }}/release"
+          out="$RUNNER_TEMP/creator"
+          mkdir -p "$out"
+          ext=""; [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
+          for b in ${{ matrix.binaries }}; do cp "$rel/$b$ext" "$out/"; done
+          # Linux sandbox: Codex looks for a bundled bubblewrap at codex-resources/bwrap.
+          if [[ -f "$out/bwrap" ]]; then mkdir -p "$out/codex-resources" && mv "$out/bwrap" "$out/codex-resources/bwrap"; fi
+          cp ../LICENSE ../NOTICE "$out/"
+          cp ../creator/README.zh-CN.md "$out/使用说明.md"
+          cd "$out"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "$RUNNER_TEMP/${{ matrix.archive }}" ./* >/dev/null
+          else
+            tar czf "$RUNNER_TEMP/${{ matrix.archive }}" ./*
+          fi
+          (cd "$RUNNER_TEMP" && sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256" 2>/dev/null || shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: |
+            ${{ runner.temp }}/${{ matrix.archive }}
+            ${{ runner.temp }}/${{ matrix.archive }}.sha256
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ needs.plan.outputs.tag }}"
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "造物主 Creator 内核 $tag" \
+            --notes "造物主 Creator 内核（基于开源 Codex，Apache-2.0）。Windows 解压后运行 creator.exe login 登录紫微星通行证。"

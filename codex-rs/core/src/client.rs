@@ -1061,7 +1061,7 @@ impl ModelClient {
                 .with_telemetry(Some(request_telemetry));
 
         let payload = ApiMemorySummarizeInput {
-            model: model_info.slug.clone(),
+            model: crate::creator_alias::api_model_slug(&model_info.slug),
             raw_memories,
             reasoning: effort
                 .map(|effort| model_info.resolve_reasoning_effort(effort))
@@ -1319,7 +1319,8 @@ impl ModelClient {
         }
         let client_metadata = responses_metadata.client_metadata(include_internal);
         let request = ResponsesApiRequest {
-            model: model_info.slug.clone(),
+            // 造物主 Creator: catalog-only slugs (e.g. B31.Si-1.3) map to a served model.
+            model: crate::creator_alias::api_model_slug(&model_info.slug),
             input,
             tools,
             tool_choice: "auto".to_string(),
