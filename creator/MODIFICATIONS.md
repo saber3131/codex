@@ -33,4 +33,10 @@ off, hosted web search off. The model catalog keeps only the models the 龍華�
 endpoint serves (it is probed with an unknown model name, which is not billed), and uses the
 freeform `apply_patch` tool, which 龍華樹 converts for every upstream provider.
 
+Startup also keeps `config.toml` current through numbered migrations (revision 1 turns
+off Codex's background-server auto start, which downloads an official Codex build), writes a
+managed global `AGENTS.md` listing other coding CLIs found on PATH, and — when Windows
+Explorer starts `creator.exe` by double-click — signs in interactively, works in
+`Documents\造物主工作区`, and keeps the window open if it stops with an error.
+
 Creator is not an OpenAI product and does not use OpenAI trademarks for its own branding.

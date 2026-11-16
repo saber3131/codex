@@ -85,6 +85,13 @@ fn prepare_environment() -> Result<()> {
         set_env(ORIGINATOR_ENV, "creator".as_ref());
     }
     seed_defaults(&home)?;
+    if let Err(err) = migrate_config(&home) {
+        eprintln!("造物主 Creator：更新设置失败：{err:#}");
+    }
+    write_harness_instructions(&home);
+    if double_clicked() {
+        double_click_welcome(&home);
+    }
     if std::env::var_os(API_KEY_ENV).is_none()
         && let Some(key) = read_passport(&home).api_key.filter(|k| !k.is_empty())
     {
@@ -576,6 +583,10 @@ model_catalog_json = {catalog}
 check_for_update_on_startup = false
 web_search = "disabled"
 
+[features]
+# Codex's shared background server would download and run an official Codex build.
+daemon_auto_start = false
+
 [analytics]
 enabled = false
 
@@ -645,6 +656,157 @@ fn seed_defaults(home: &Path) -> Result<()> {
         write_atomic(&config, default_config(home).as_bytes())?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- upgrades
+
+const STATE_FILE: &str = "creator-state.json";
+const CONFIG_REVISION: u64 = 1;
+
+/// Bring an existing `config.toml` up to date without overwriting the user's edits.
+fn migrate_config(home: &Path) -> Result<()> {
+    let state_path = home.join(STATE_FILE);
+    let mut state: Value = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    let revision = state.get("config_revision").and_then(Value::as_u64).unwrap_or(0);
+    if revision >= CONFIG_REVISION {
+        return Ok(());
+    }
+    let path = home.join("config.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let parsed: toml::Value = toml::from_str(&text).context("config.toml 格式有误，未自动更新")?;
+    // Revision 1: never auto-start Codex's background server (it installs an official
+    // Codex build into ~/.creator/packages and made double-clicked windows close).
+    let has_key = parsed
+        .get("features")
+        .and_then(|f| f.get("daemon_auto_start"))
+        .is_some();
+    if !has_key {
+        let line = "daemon_auto_start = false";
+        let updated = if parsed.get("features").is_some() {
+            text.replacen("[features]", &format!("[features]\n{line}"), 1)
+        } else {
+            format!("{}\n[features]\n{line}\n", text.trim_end())
+        };
+        toml::from_str::<toml::Value>(&updated).context("更新后的 config.toml 无效")?;
+        write_atomic(&path, updated.as_bytes())?;
+    }
+    state["config_revision"] = json!(CONFIG_REVISION);
+    write_atomic(&state_path, serde_json::to_string_pretty(&state)?.as_bytes())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- other harnesses
+
+const MANAGED_MARK: &str = "<!-- creator:managed -->";
+
+/// Other coding agents installed on this computer that Creator can hand work to through
+/// its shell tool. They run with this computer's own logins and quotas.
+const HARNESSES: &[(&str, &str, &str)] = &[
+    ("codex", "OpenAI Codex", "codex exec --skip-git-repo-check \"任务\""),
+    ("claude", "Claude Code", "claude -p \"任务\""),
+    ("gemini", "Gemini CLI", "gemini -p \"任务\""),
+    ("opencode", "OpenCode", "opencode run \"任务\""),
+    ("zcode", "ZCode", "zcode \"任务\""),
+];
+
+/// Keep `~/.creator/AGENTS.md` (global instructions) listing the harnesses found on PATH.
+/// A user-written file without the managed marker is never touched.
+fn write_harness_instructions(home: &Path) {
+    let path = home.join("AGENTS.md");
+    if let Ok(existing) = std::fs::read_to_string(&path)
+        && !existing.contains(MANAGED_MARK)
+    {
+        return;
+    }
+    let found: Vec<_> = HARNESSES
+        .iter()
+        .filter(|(bin, _, _)| which::which(bin).is_ok())
+        .collect();
+    let mut text = format!(
+        "{MANAGED_MARK}\n# 造物主 Creator 全局说明（自动生成，删除第一行标记后可自行编辑）\n\n用户使用简体中文时，用简体中文回答。\n"
+    );
+    if !found.is_empty() {
+        text.push_str("\n## 本机可调用的其他编程代理\n\n需要时可以用 shell 把一个独立的子任务交给它们。它们使用这台电脑自己的登录账号和额度；先告诉用户要调用哪一个，再把结果检查后汇总进你的回答。\n\n");
+        for (bin, name, example) in &found {
+            text.push_str(&format!("- {name}（`{bin}`）：`{example}`\n"));
+        }
+    }
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        let _ = write_atomic(&path, text.as_bytes());
+    }
+}
+
+// ---------------------------------------------------------------- double-click (Windows)
+
+/// True when Windows Explorer started us in a console of our own (a double-click),
+/// with no arguments. Such a window closes as soon as the process exits.
+fn double_clicked() -> bool {
+    if std::env::args_os().len() > 1 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let mut pids = [0u32; 4];
+        // SAFETY: the buffer is valid for `pids.len()` entries.
+        let count = unsafe {
+            windows_sys::Win32::System::Console::GetConsoleProcessList(
+                pids.as_mut_ptr(),
+                pids.len() as u32,
+            )
+        };
+        count == 1
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn wait_for_enter(msg: &str) {
+    eprintln!("\n{msg}");
+    let mut s = String::new();
+    let _ = std::io::stdin().read_line(&mut s);
+}
+
+/// After a double-click: show who we are, sign in if needed, and work in a dedicated
+/// folder instead of the program folder.
+fn double_click_welcome(home: &Path) {
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle("造物主 Creator"));
+    eprintln!("造物主 Creator · 紫微星会 / 龍華樹 ASI\n");
+    let signed_in = std::env::var_os(API_KEY_ENV).is_some()
+        || read_passport(home).api_key.is_some_and(|k| !k.is_empty());
+    if !signed_in {
+        eprintln!("第一次使用，请先用紫微星通行证登录。");
+        eprintln!("（用 Google 或 GitHub 注册、没设置过密码的账号：邮箱填好后，密码处直接按回车，改用邮箱验证码。）\n");
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|rt| rt.block_on(run_login_interactive()));
+        if let Err(err) = result {
+            eprintln!("\n登录没有成功：{err:#}");
+            wait_for_enter("按回车键关闭窗口，稍后再双击 creator.exe 重试。");
+            std::process::exit(1);
+        }
+    }
+    if let Ok(docs) = user_home().map(|h| h.join("Documents").join("造物主工作区")) {
+        if std::fs::create_dir_all(&docs).is_ok() && std::env::set_current_dir(&docs).is_ok() {
+            eprintln!("工作文件夹：{}\n", docs.display());
+        }
+    }
+}
+
+/// Keep a double-clicked window open when Creator stops with an error.
+pub fn pause_if_double_clicked(result: &Result<()>) {
+    if invoked_as_creator() && double_clicked() && result.is_err() {
+        if let Err(err) = result {
+            eprintln!("\n造物主 Creator 遇到问题：{err:#}");
+        }
+        wait_for_enter("按回车键关闭窗口。");
+    }
 }
 
 // ---------------------------------------------------------------- passport
@@ -826,6 +988,14 @@ fn read_stdin_trimmed() -> Result<String> {
     Ok(s.trim().to_string())
 }
 
+/// The double-click login runs on a temporary current-thread runtime before the main
+/// runtime starts, so setting the key in the environment is still single-threaded.
+fn tokio_runtime_is_multithreaded() -> bool {
+    tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false)
+}
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -853,7 +1023,29 @@ pub struct LoginArgs {
     pub api_key: Option<String>,
 }
 
+/// Login used by the double-click flow: an empty password switches to an email code.
+async fn run_login_interactive() -> Result<()> {
+    let email = prompt_line("紫微星通行证邮箱：")?;
+    let password = prompt_secret("密码（输入时不显示；没有密码直接按回车）：")?;
+    let code = password.is_empty();
+    run_login_with(
+        LoginArgs {
+            email: Some(email),
+            code,
+            password_stdin: false,
+            refresh_token_stdin: false,
+            api_key: None,
+        },
+        (!code).then_some(password),
+    )
+    .await
+}
+
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    run_login_with(args, None).await
+}
+
+async fn run_login_with(args: LoginArgs, given_password: Option<String>) -> Result<()> {
     let home = creator_home()?;
     let client = http()?;
     if let Some(key) = args.api_key.filter(|k| !k.trim().is_empty()) {
@@ -895,7 +1087,9 @@ pub async fn run_login(args: LoginArgs) -> Result<()> {
             .await?;
             session_from(&body)?
         } else {
-            let password = if args.password_stdin {
+            let password = if let Some(p) = given_password {
+                p
+            } else if args.password_stdin {
                 read_stdin_trimmed()?
             } else {
                 prompt_secret("密码（输入时不显示）：")?
@@ -938,6 +1132,12 @@ pub async fn run_login(args: LoginArgs) -> Result<()> {
             .or_else(|| created.get("key").and_then(|k| k.get("id")))
             .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_u64().map(|n| n.to_string())));
         p.api_key = Some(key);
+    }
+    if let Some(key) = p.api_key.clone()
+        && std::env::var_os(API_KEY_ENV).is_none()
+        && !tokio_runtime_is_multithreaded()
+    {
+        set_env(API_KEY_ENV, key.as_ref());
     }
     p.user_id = user_id;
     p.email = email.clone();

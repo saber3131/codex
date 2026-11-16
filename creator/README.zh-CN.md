@@ -11,10 +11,11 @@
 
 ## 第一次使用（Windows）
 
-1. 解压后，在文件夹空白处按住 Shift 点右键，选「在终端中打开」。
-2. 输入 `.\creator.exe login`，按提示填写通行证邮箱和密码。
-   - 用 Google 或 GitHub 注册、没有设置密码的账号，改用 `.\creator.exe login --code`，系统会把验证码发到邮箱。
-3. 登录成功后输入 `.\creator.exe`，就能像 Codex 一样直接对话、让它改代码或操作电脑。
+1. 解压后**直接双击 `creator.exe`**。
+2. 第一次会让您登录紫微星通行证：输入邮箱和密码。用 Google 或 GitHub 注册、没有设置密码的账号，密码处直接按回车，系统会把验证码发到邮箱。
+3. 登录后自动进入对话界面，工作文件夹是「文档\造物主工作区」。直接说要做什么就行。
+
+也可以在终端里运行：`.\creator.exe login` 登录、`.\creator.exe` 打开对话。
 
 ## 常用命令
 
@@ -35,6 +36,7 @@
 - `models.json`：模型目录，由 `creator sync` 生成。
 - `b31.json`、`agents\*.toml`：B31.Si-1.3 的分工表。
 - `passport.json`：登录信息（龍華树 Key），不要发给别人。
+- `AGENTS.md`：全局说明。会自动列出本机装好的 Codex、Claude Code、Gemini CLI 等，需要时造物主可以把子任务交给它们（用的是这台电脑自己的账号和额度）。
 
 ## 许可证
 
