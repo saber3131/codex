@@ -101,6 +101,13 @@ jobs:
           git fetch https://github.com/openai/codex.git main
           git merge --no-edit ${{ needs.plan.outputs.upstream }}
 
+      - name: Allow long paths (Windows)
+        if: runner.os == 'Windows'
+        working-directory: .
+        run: |
+          git config --global core.longpaths true
+          git config --system core.longpaths true || true
+
       - name: Install Rust toolchain
         working-directory: .
         run: |
@@ -133,10 +140,10 @@ jobs:
           cargo build --locked --target ${{ matrix.target }} --release "${args[@]}"
 
       - name: Smoke test
-        if: runner.os != 'Windows'
         run: |
           export CREATOR_HOME="$RUNNER_TEMP/creator-home"
-          "$CARGO_TARGET_DIR/${{ matrix.target }}/release/creator" --help | head -20
+          ext=""; [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
+          "$CARGO_TARGET_DIR/${{ matrix.target }}/release/creator$ext" --help | head -20
           test -f "$CREATOR_HOME/config.toml" && test -f "$CREATOR_HOME/models.json"
 
       - name: Package
